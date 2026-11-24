@@ -169,6 +169,6 @@ def test_existing_restrictions_preserved(container):
 def test_database_still_reachable():
     code = (
         "import json, os, urllib.request as u\n"
-        "print(len(json.load(u.urlopen(os.environ['GATEWAY_URL'] + '/projects', timeout=10))))"
+        "print(len(json.load(u.urlopen(os.environ['GATEWAY_URL'] + '/projects', timeout=10))['items']))"
     )
     assert int(agent_python(code)) >= 2

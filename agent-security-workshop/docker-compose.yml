@@ -29,6 +29,7 @@ services:
     volumes:
       - student_agent_data:/var/lib/postgresql/data
       - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db-permissions.sql:/docker-entrypoint-initdb.d/02-permissions.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lab_admin -d agent_lab"]
       interval: 2s

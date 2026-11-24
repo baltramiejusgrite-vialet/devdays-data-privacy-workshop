@@ -98,7 +98,7 @@ def test_agent_reaches_model_proxy():
 
 
 def test_gateway_lists_projects():
-    code = "import json, os, urllib.request as u; print(json.load(u.urlopen(os.environ['GATEWAY_URL'] + '/projects', timeout=10)))"
+    code = "import json, os, urllib.request as u; print(json.load(u.urlopen(os.environ['GATEWAY_URL'] + '/projects', timeout=10))['items'])"
     assert exec_python("agent", code) == "[{'project_id': 1, 'title': 'Conference schedule'}, {'project_id': 2, 'title': 'Workshop materials'}]"
 
 
