@@ -168,9 +168,7 @@ def test_existing_restrictions_preserved(container):
 
 def test_database_still_reachable():
     code = (
-        "import os, psycopg\n"
-        "with psycopg.connect(os.environ['DATABASE_URL'], connect_timeout=10) as c:\n"
-        "    c.read_only = True\n"
-        "    print(c.execute('SELECT count(*) FROM lab_public.projects').fetchone()[0])"
+        "import json, os, urllib.request as u\n"
+        "print(len(json.load(u.urlopen(os.environ['GATEWAY_URL'] + '/projects', timeout=10))))"
     )
     assert int(agent_python(code)) >= 2

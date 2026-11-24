@@ -1,0 +1,8 @@
+{
+  "host": "db",
+  "port": 5432,
+  "dbname": "agent_lab",
+  "user": "lab_admin",
+  "password": "student-demo",
+  "options": "-c default_transaction_read_only=on"
+}

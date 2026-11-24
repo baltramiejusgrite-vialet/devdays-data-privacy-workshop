@@ -1,5 +1,22 @@
 name: devdays-agent-student-workshop
 
+# Network layout (no service publishes a port to the host):
+#   agent_net  (internal)  agent, gateway, model-proxy
+#   db_net     (internal)  db, gateway
+#   egress_net (outbound)  model-proxy only, to reach api.openai.com
+# The agent has no route to the database or the internet except through
+# the gateway (read-only) and the model proxy (holds the OpenAI key).
+
+x-hardened: &hardened
+  privileged: false
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  read_only: true
+  ipc: private
+  cgroup: private
+
 services:
   db:
     image: postgres:16
@@ -7,8 +24,8 @@ services:
       POSTGRES_DB: agent_lab
       POSTGRES_USER: lab_admin
       POSTGRES_PASSWORD: student-demo
-    ports:
-      - "127.0.0.1:15434:5432"
+    networks:
+      - db_net
     volumes:
       - student_agent_data:/var/lib/postgresql/data
       - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
@@ -18,53 +35,90 @@ services:
       timeout: 3s
       retries: 15
 
+  gateway:
+    <<: *hardened
+    image: devdays-agent-gateway
+    build:
+      context: ./gateway
+    user: "10002:10002"
+    networks:
+      - agent_net
+      - db_net
+    volumes:
+      - ./gateway/connection.json:/run/gateway/connection.json:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      db:
+        condition: service_healthy
+
+  model-proxy:
+    <<: *hardened
+    image: devdays-agent-model-proxy
+    build:
+      context: ./model-proxy
+    user: "10003:10003"
+    networks:
+      - agent_net
+      - egress_net
+    environment:
+      # The real key lives only here, passed through from the host; never written in this file.
+      OPENAI_API_KEY:
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   agent:
+    <<: *hardened
     image: devdays-agent-student
     build:
       context: .
     user: "10001:10001"
-    privileged: false
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    read_only: true
-    # Own namespaces only: never share the host's PID, IPC, UTS, user or cgroup namespaces.
-    ipc: private
-    cgroup: private
+    networks:
+      - agent_net
     tmpfs:
       - /tmp:mode=1777
       - /home/agent:uid=10001,gid=10001,mode=0700
     environment:
-      DATABASE_URL: postgresql://lab_admin:student-demo@db:5432/agent_lab
-      # Passed through from the host environment; the value is never written here.
-      OPENAI_API_KEY:
+      GATEWAY_URL: http://gateway:8000
+      OPENAI_BASE_URL: http://model-proxy:8080/v1
     # Only the agent entry point and the read-only credentials are exposed.
     # No project folder, host directories, Docker socket or SSH agent socket.
     volumes:
       - ./starter.py:/workspace/starter.py:ro
       - agent_credentials:/run/credentials/codex:ro
     depends_on:
-      db:
+      gateway:
+        condition: service_healthy
+      model-proxy:
         condition: service_healthy
 
-  # One-off: stores the Codex API key login in the credential volume.
+  # One-off: stores a placeholder Codex login in the credential volume.
+  # The real key stays in model-proxy, which replaces it on every request.
   #   docker compose --profile setup run --rm codex-login
   codex-login:
+    <<: *hardened
     image: devdays-agent-student
     profiles: ["setup"]
     user: "10001:10001"
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    read_only: true
+    network_mode: none
     environment:
       CODEX_HOME: /run/credentials/codex
-      OPENAI_API_KEY:
     volumes:
       - agent_credentials:/run/credentials/codex
-    command: ["sh", "-c", "printenv OPENAI_API_KEY | codex login --with-api-key"]
+    command: ["sh", "-c", "echo proxy-managed | codex login --with-api-key"]
+
+networks:
+  agent_net:
+    internal: true
+  db_net:
+    internal: true
+  egress_net: {}
 
 volumes:
   student_agent_data:
