@@ -47,7 +47,6 @@ def test_view_returns_nothing_for_unknown_company(readonly_conn):
 @pytest.mark.parametrize(
     "table",
     [
-        "private_db.company",
         "private_db.employment_contract",
         "private_db.payroll_event",
         "private_db.person_identity",
@@ -63,12 +62,12 @@ def test_public_schema_is_denied(readonly_conn):
         readonly_conn.execute("SELECT 1 FROM public_db.company_registry LIMIT 1").fetchall()
 
 
-def test_only_the_view_is_granted(readonly_conn):
+def test_only_the_view_and_company_table_are_granted(readonly_conn):
     grants = readonly_conn.execute(
         "SELECT table_schema || '.' || table_name FROM information_schema.role_table_grants "
-        "WHERE grantee = current_user"
+        "WHERE grantee = current_user ORDER BY 1"
     ).fetchall()
-    assert grants == [(VIEW,)]
+    assert grants == [("private_db.company",), (VIEW,)]
 
 
 def test_readonly_user_cannot_write(readonly_conn):
