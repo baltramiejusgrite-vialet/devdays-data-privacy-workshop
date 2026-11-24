@@ -22,8 +22,16 @@ services:
     image: devdays-agent-student
     build:
       context: .
+    user: "10001:10001"
+    privileged: false
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     environment:
       DATABASE_URL: postgresql://lab_admin:student-demo@db:5432/agent_lab
+      # Passed through from the host environment; the value is never written here.
+      OPENAI_API_KEY:
     volumes:
       - .:/workspace
     depends_on:
