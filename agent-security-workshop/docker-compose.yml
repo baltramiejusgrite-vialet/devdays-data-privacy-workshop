@@ -29,6 +29,9 @@ services:
     security_opt:
       - no-new-privileges:true
     read_only: true
+    # Own namespaces only: never share the host's PID, IPC, UTS, user or cgroup namespaces.
+    ipc: private
+    cgroup: private
     tmpfs:
       - /tmp:mode=1777
       - /home/agent:uid=10001,gid=10001,mode=0700
@@ -36,8 +39,10 @@ services:
       DATABASE_URL: postgresql://lab_admin:student-demo@db:5432/agent_lab
       # Passed through from the host environment; the value is never written here.
       OPENAI_API_KEY:
+    # Only the agent entry point and the read-only credentials are exposed.
+    # No project folder, host directories, Docker socket or SSH agent socket.
     volumes:
-      - .:/workspace
+      - ./starter.py:/workspace/starter.py:ro
       - agent_credentials:/run/credentials/codex:ro
     depends_on:
       db:

@@ -17,7 +17,10 @@ CREDENTIAL_DIR = "/run/credentials/codex"
 
 
 def run(*args, check=True):
-    return subprocess.run(args, cwd=LAB_DIR, capture_output=True, text=True, check=check)
+    # stdin closed: in an interactive terminal docker would otherwise wait on it.
+    return subprocess.run(
+        args, cwd=LAB_DIR, capture_output=True, text=True, check=check, stdin=subprocess.DEVNULL, timeout=60
+    )
 
 
 def agent_exec(*args, check=True):
@@ -112,23 +115,35 @@ def test_no_host_devices_exposed(container):
     assert not container["HostConfig"]["Devices"]
 
 
-# Requirement 5: preserve filesystem access
+# Requirement 5: filesystem access (workspace read-only since step 3; /tmp is the scratch area)
 
 
-def test_workspace_is_mounted_read_write(container):
-    mounts = [m for m in container["Mounts"] if m["Destination"] == "/workspace"]
+def test_workspace_entry_point_is_read_only_mount(container):
+    mounts = [m for m in container["Mounts"] if m["Destination"] == "/workspace/starter.py"]
     assert len(mounts) == 1
-    assert mounts[0]["RW"] is True
+    assert mounts[0]["RW"] is False
 
 
-def test_can_read_existing_workspace_file():
-    assert agent_python("import pathlib; print(len(pathlib.Path('/workspace/schema.sql').read_text()) > 0)") == "True"
+def test_can_read_workspace_entry_point():
+    assert agent_python("import pathlib; print(len(pathlib.Path('/workspace/starter.py').read_text()) > 0)") == "True"
 
 
-def test_can_create_read_delete_workspace_file():
+def test_writing_to_workspace_fails():
+    code = (
+        "import pathlib\n"
+        "try:\n"
+        "    pathlib.Path('/workspace/.write-test').write_text('x')\n"
+        "    print('written')\n"
+        "except OSError as e:\n"
+        "    print(type(e).__name__)"
+    )
+    assert agent_python(code) in {"OSError", "PermissionError"}
+
+
+def test_writing_to_tmp_succeeds():
     code = (
         "import pathlib, tempfile\n"
-        "f = tempfile.NamedTemporaryFile(dir='/workspace', prefix='.hardening-', delete=False)\n"
+        "f = tempfile.NamedTemporaryFile(dir='/tmp', prefix='.hardening-', delete=False)\n"
         "f.write(b'ok'); f.close()\n"
         "p = pathlib.Path(f.name)\n"
         "content = p.read_bytes(); p.unlink()\n"
