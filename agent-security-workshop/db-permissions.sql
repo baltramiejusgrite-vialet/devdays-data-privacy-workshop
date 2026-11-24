@@ -1,9 +1,9 @@
--- Database permissions for the gateway (steps 5, 6 and 7). Safe to run repeatedly.
+-- Database permissions for the gateway (steps 5 to 8). Safe to run repeatedly.
 -- Runs automatically on a fresh database (mounted into docker-entrypoint-initdb.d)
 -- and can be re-applied as lab_admin:
 --   docker compose exec -T db psql -v ON_ERROR_STOP=1 -U lab_admin -d agent_lab -f /docker-entrypoint-initdb.d/02-permissions.sql
 --
--- lab_gateway        login used by the gateway; no table access, EXECUTE on the token functions only
+-- gateway_reader     login used by the gateway; EXECUTE on the token functions, INSERT-only audit
 -- layer_row_reader   NOLOGIN owner of the functions; the only role that reads salary rows and tokens
 
 DO $$
@@ -11,8 +11,13 @@ BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'layer_row_reader') THEN
         CREATE ROLE layer_row_reader NOLOGIN;
     END IF;
-    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'lab_gateway') THEN
-        CREATE ROLE lab_gateway LOGIN PASSWORD 'gateway-demo';
+    -- Step 8 names the gateway login gateway_reader; earlier steps called it lab_gateway.
+    IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'lab_gateway')
+       AND NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'gateway_reader') THEN
+        ALTER ROLE lab_gateway RENAME TO gateway_reader;
+        ALTER ROLE gateway_reader PASSWORD 'gateway-demo';
+    ELSIF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'gateway_reader') THEN
+        CREATE ROLE gateway_reader LOGIN PASSWORD 'gateway-demo';
     END IF;
 END
 $$;
@@ -30,7 +35,7 @@ CREATE TABLE IF NOT EXISTS lab_private.access_tokens (
 
 -- Nobody reads the private schema except the function owner.
 REVOKE ALL ON SCHEMA lab_private FROM PUBLIC;
-REVOKE ALL ON ALL TABLES IN SCHEMA lab_private FROM PUBLIC, lab_gateway;
+REVOKE ALL ON ALL TABLES IN SCHEMA lab_private FROM PUBLIC, gateway_reader;
 GRANT USAGE ON SCHEMA lab_private TO layer_row_reader;
 GRANT SELECT ON lab_private.employee_salaries TO layer_row_reader;
 GRANT SELECT ON lab_private.access_tokens TO layer_row_reader;
@@ -100,15 +105,38 @@ ALTER FUNCTION lab_api.salary_summary(text, integer) OWNER TO layer_row_reader;
 GRANT USAGE ON SCHEMA lab_api TO layer_row_reader;
 
 -- Step 6's open summary (any company, no identity) and step 5's rows: nobody may execute them.
-REVOKE ALL ON FUNCTION lab_api.salary_rows(integer) FROM PUBLIC, lab_gateway;
-REVOKE ALL ON FUNCTION lab_api.company_salary_summary(integer) FROM PUBLIC, lab_gateway;
+REVOKE ALL ON FUNCTION lab_api.salary_rows(integer) FROM PUBLIC, gateway_reader;
+REVOKE ALL ON FUNCTION lab_api.company_salary_summary(integer) FROM PUBLIC, gateway_reader;
 -- Step 7: the gateway may only use the token-checked functions.
 REVOKE ALL ON FUNCTION lab_api.authenticate(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION lab_api.salary_summary(text, integer) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION lab_api.authenticate(text) TO lab_gateway;
-GRANT EXECUTE ON FUNCTION lab_api.salary_summary(text, integer) TO lab_gateway;
+GRANT EXECUTE ON FUNCTION lab_api.authenticate(text) TO gateway_reader;
+GRANT EXECUTE ON FUNCTION lab_api.salary_summary(text, integer) TO gateway_reader;
 
 -- Gateway login: connect, call the aggregate, read public projects. Nothing else.
-GRANT CONNECT ON DATABASE agent_lab TO lab_gateway;
-GRANT USAGE ON SCHEMA lab_api, lab_public TO lab_gateway;
-GRANT SELECT ON lab_public.projects TO lab_gateway;
+GRANT CONNECT ON DATABASE agent_lab TO gateway_reader;
+GRANT USAGE ON SCHEMA lab_api, lab_public TO gateway_reader;
+GRANT SELECT ON lab_public.projects TO gateway_reader;
+
+-- Step 8: append-only audit log. The gateway records every request (except /health)
+-- and commits the row before it returns any data. It may INSERT, never UPDATE,
+-- DELETE or even SELECT. Rows hold access metadata only: no tokens, headers,
+-- prompts or salary values.
+CREATE SCHEMA IF NOT EXISTS lab_audit;
+CREATE TABLE IF NOT EXISTS lab_audit.events (
+    event_id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    occurred_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    request_id  uuid NOT NULL,
+    actor       text,
+    action      text NOT NULL,
+    company_id  integer,
+    method      text NOT NULL,
+    path        text NOT NULL,
+    query       text,
+    status      integer NOT NULL,
+    outcome     text NOT NULL CHECK (outcome IN ('allowed', 'denied', 'error'))
+);
+REVOKE ALL ON SCHEMA lab_audit FROM PUBLIC;
+REVOKE ALL ON lab_audit.events FROM PUBLIC, gateway_reader;
+GRANT USAGE ON SCHEMA lab_audit TO gateway_reader;
+GRANT INSERT ON lab_audit.events TO gateway_reader;

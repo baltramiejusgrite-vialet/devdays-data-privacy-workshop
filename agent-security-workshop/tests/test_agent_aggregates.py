@@ -89,7 +89,7 @@ def test_cannot_switch_to_privileged_role(role):
 
 
 def test_gateway_login_is_not_admin():
-    code = "SELECT 1 FROM pg_roles WHERE rolname = current_user AND current_user = 'lab_gateway' AND NOT rolsuper HAVING count(*) = 1"
+    code = "SELECT 1 FROM pg_roles WHERE rolname = current_user AND current_user = 'gateway_reader' AND NOT rolsuper HAVING count(*) = 1"
     assert db_as_gateway(code) == "ok"
 
 

@@ -118,25 +118,24 @@ def test_gateway_config_mounted_read_only(containers):
     assert mounts == {"/run/gateway/connection.json": False}
 
 
-def test_gateway_database_session_is_read_only():
-    code = (
-        "import json, psycopg\n"
-        "cfg = json.load(open('/run/gateway/connection.json'))\n"
-        "with psycopg.connect(**cfg) as c:\n"
-        "    print(c.execute('SHOW default_transaction_read_only').fetchone()[0])"
-    )
-    assert exec_python("gateway", code) == "on"
-
-
-def test_gateway_database_write_refused():
+# Since step 8 the gateway's session must INSERT audit rows, so it is no longer a
+# read-only session; every other write is refused by its permissions instead.
+@pytest.mark.parametrize("sql", [
+    "UPDATE lab_public.projects SET title = title WHERE project_id = 1",
+    "INSERT INTO lab_public.projects VALUES (99, 'x')",
+    "DELETE FROM lab_public.projects WHERE project_id = 99",
+    "CREATE TABLE lab_public.gateway_probe (i int)",
+    "CREATE TABLE lab_api.gateway_probe (i int)",
+])
+def test_gateway_database_write_refused(sql):
     code = (
         "import json, psycopg\n"
         "cfg = json.load(open('/run/gateway/connection.json'))\n"
         "try:\n"
         "    with psycopg.connect(**cfg) as c:\n"
-        "        c.execute(\"UPDATE lab_public.projects SET title = title WHERE project_id = 1\")\n"
+        f"        c.execute({sql!r})\n"
         "    print('written')\n"
-        "except psycopg.errors.ReadOnlySqlTransaction:\n"
+        "except psycopg.errors.InsufficientPrivilege:\n"
         "    print('refused')"
     )
     assert exec_python("gateway", code) == "refused"

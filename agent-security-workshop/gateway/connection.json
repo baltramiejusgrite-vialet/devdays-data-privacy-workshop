@@ -2,7 +2,6 @@
   "host": "db",
   "port": 5432,
   "dbname": "agent_lab",
-  "user": "lab_gateway",
-  "password": "gateway-demo",
-  "options": "-c default_transaction_read_only=on"
+  "user": "gateway_reader",
+  "password": "gateway-demo"
 }
