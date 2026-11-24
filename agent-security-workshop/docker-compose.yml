@@ -7,6 +7,9 @@ name: devdays-agent-student-workshop
 # The agent has no route to the database or the internet except through
 # the gateway (read-only) and the model proxy (holds the OpenAI key).
 
+# The one model the broker allows; Codex in the agent is configured to use the same one.
+x-model: &model gpt-6.2-sol
+
 x-hardened: &hardened
   privileged: false
   cap_drop:
@@ -68,6 +71,13 @@ services:
     environment:
       # The real key lives only here, passed through from the host; never written in this file.
       OPENAI_API_KEY:
+      MODEL_PROXY_MODEL: *model
+      MODEL_PROXY_REQUEST_LIMIT: "60"
+      MODEL_PROXY_MAX_OUTPUT_TOKENS: "4096"
+      MODEL_PROXY_STATE_DIR: /var/lib/model-proxy
+    volumes:
+      # Durable request budget and the hash of the agent's local proxy token.
+      - model_proxy_state:/var/lib/model-proxy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
       interval: 5s
@@ -88,13 +98,17 @@ services:
     environment:
       GATEWAY_URL: http://gateway:8000
       OPENAI_BASE_URL: http://model-proxy:8080/v1
-    # Only the agent entry point and the read-only credentials are exposed.
+      CODEX_MODEL: *model
+    # Only the agent's scripts and read-only credentials are exposed.
     # No project folder, host directories, Docker socket or SSH agent socket.
+    # The agent holds a local model-proxy token, never the OpenAI key.
     volumes:
       - ./starter.py:/workspace/starter.py:ro
       - ./client.py:/workspace/client.py:ro
+      - ./check_model_proxy.py:/workspace/check_model_proxy.py:ro
       - agent_credentials:/run/credentials/codex:ro
       - agent_identity:/run/identity:ro
+      - model_proxy_client:/run/model-proxy:ro
     depends_on:
       gateway:
         condition: service_healthy
@@ -115,6 +129,20 @@ services:
     volumes:
       - agent_credentials:/run/credentials/codex
     command: ["sh", "-c", "echo proxy-managed | codex login --with-api-key"]
+
+  # One-off: issues the agent's local model-proxy token (step 9). Stores only its hash in
+  # the proxy's state volume and the token in the volume the agent mounts read-only.
+  #   docker compose --profile setup run --rm model-proxy-token-issuer
+  model-proxy-token-issuer:
+    <<: *hardened
+    image: devdays-agent-model-proxy
+    profiles: ["setup"]
+    user: "10003:10003"
+    network_mode: none
+    volumes:
+      - model_proxy_state:/var/lib/model-proxy
+      - model_proxy_client:/run/model-proxy-client
+    command: ["python", "/app/issue_client_token.py"]
 
   # One-off: issues the agent's gateway token (step 7). Stores only its hash in the
   # database and writes the token to the identity volume the agent mounts read-only.
@@ -149,3 +177,5 @@ volumes:
   student_agent_data:
   agent_credentials:
   agent_identity:
+  model_proxy_state:
+  model_proxy_client:

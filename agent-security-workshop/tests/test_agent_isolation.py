@@ -15,8 +15,10 @@ LAB_DIR = Path(__file__).resolve().parent.parent
 ALLOWED_MOUNTS = {
     "/workspace/starter.py": False,
     "/workspace/client.py": False,
+    "/workspace/check_model_proxy.py": False,
     "/run/credentials/codex": False,
     "/run/identity": False,
+    "/run/model-proxy": False,
 }
 HOST_PROJECT_FILES = [
     "/workspace/docker-compose.yml",
@@ -69,8 +71,9 @@ def test_entry_point_readable():
     assert agent_python("import pathlib; print(pathlib.Path('/workspace/starter.py').is_file())") == "True"
 
 
-def test_workspace_contains_only_entry_point_and_client():
-    assert agent_python("import os; print(sorted(os.listdir('/workspace')))") == "['client.py', 'starter.py']"
+def test_workspace_contains_only_agent_scripts():
+    listing = agent_python("import os; print(sorted(os.listdir('/workspace')))")
+    assert listing == "['check_model_proxy.py', 'client.py', 'starter.py']"
 
 
 # Host files are inaccessible
@@ -95,9 +98,9 @@ def test_no_host_directory_mounted():
     assert leaked == []
 
 
-def test_no_bind_mount_except_entry_point_and_client(container):
+def test_no_bind_mount_except_agent_scripts(container):
     binds = sorted(m["Destination"] for m in container["Mounts"] if m["Type"] == "bind")
-    assert binds == ["/workspace/client.py", "/workspace/starter.py"]
+    assert binds == ["/workspace/check_model_proxy.py", "/workspace/client.py", "/workspace/starter.py"]
 
 
 # Docker and SSH sockets are blocked
