@@ -1,0 +1,8 @@
+--- pseudo-prod.schema.txt
++++ original.schema.txt
+@@ -1,4 +1,5 @@
+ table business.companies
++  address: text
+   annual_profit_eur: integer not null
+   company_id: bigint not null
+   company_name: text not null

@@ -1,0 +1,29 @@
+{
+  "uid": "sanitised-logs",
+  "title": "Sanitised logs",
+  "tags": ["log-pipeline"],
+  "timezone": "browser",
+  "refresh": "10s",
+  "time": {"from": "now-1h", "to": "now"},
+  "schemaVersion": 39,
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Sanitised records per minute by processing path",
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 8},
+      "datasource": {"type": "loki", "uid": "loki-standard"},
+      "targets": [{"refId": "A", "expr": "sum by (processing_path) (count_over_time({job=\"sanitised\"}[1m]))",
+                   "legendFormat": "{{processing_path}}"}]
+    },
+    {
+      "id": 2,
+      "type": "logs",
+      "title": "Sanitised logs (regex and Presidio paths)",
+      "gridPos": {"x": 0, "y": 8, "w": 24, "h": 16},
+      "datasource": {"type": "loki", "uid": "loki-standard"},
+      "options": {"showTime": true, "wrapLogMessage": true, "sortOrder": "Descending"},
+      "targets": [{"refId": "A", "expr": "{job=\"sanitised\"}"}]
+    }
+  ]
+}

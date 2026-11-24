@@ -1,0 +1,339 @@
+# Secure log pipeline on a single-node local Kubernetes (Docker Desktop Kubernetes or kind).
+# Deploy with:  powershell -File log-pipeline-workshop/k8s/deploy.ps1   (creates ConfigMaps and the
+# Grafana Secret from the same files the Docker Compose version uses, then applies this file).
+#
+# Same design as docker-compose.yml:
+#   pod log-apps   = app-hr + app-billing + Fluent Bit sidecar (shared emptyDir raw logs)
+#   log-presidio   = Presidio fallback (only Fluent Bit may call it)
+#   loki-forensic  = raw logs, 3-year retention (only Fluent Bit writes, only grafana-forensic reads)
+#   loki           = sanitised logs, 7-day retention (only Fluent Bit writes, only grafana reads)
+#   grafana / grafana-forensic = separate instances and credentials, reached via kubectl port-forward
+# NetworkPolicies replace the Docker networks: default deny, then only the listed flows.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: log-pipeline
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+---
+# ---------------------------------------------------------------------------------------------
+# Network policies
+# ---------------------------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny-all, namespace: log-pipeline}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-dns, namespace: log-pipeline}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: fluent-bit-egress, namespace: log-pipeline}
+spec:
+  podSelector: {matchLabels: {app: log-apps}}
+  policyTypes: [Egress, Ingress]
+  egress:
+    - to: [{podSelector: {matchLabels: {app: log-presidio}}}]
+      ports: [{protocol: TCP, port: 8000}]
+    - to: [{podSelector: {matchLabels: {app: loki}}}]
+      ports: [{protocol: TCP, port: 3100}]
+    - to: [{podSelector: {matchLabels: {app: loki-forensic}}}]
+      ports: [{protocol: TCP, port: 3100}]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app: log-presidio}}}]   # sanitised results back
+      ports: [{protocol: TCP, port: 9880}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: presidio, namespace: log-pipeline}
+spec:
+  podSelector: {matchLabels: {app: log-presidio}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app: log-apps}}}]
+      ports: [{protocol: TCP, port: 8000}]
+  egress:
+    - to: [{podSelector: {matchLabels: {app: log-apps}}}]
+      ports: [{protocol: TCP, port: 9880}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: loki-standard, namespace: log-pipeline}
+spec:
+  podSelector: {matchLabels: {app: loki}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app: log-apps}}}, {podSelector: {matchLabels: {app: grafana}}}]
+      ports: [{protocol: TCP, port: 3100}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: loki-forensic, namespace: log-pipeline}
+spec:
+  podSelector: {matchLabels: {app: loki-forensic}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app: log-apps}}}, {podSelector: {matchLabels: {app: grafana-forensic}}}]
+      ports: [{protocol: TCP, port: 3100}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: grafana-standard, namespace: log-pipeline}
+spec:
+  podSelector: {matchLabels: {app: grafana}}
+  policyTypes: [Egress]
+  egress:
+    - to: [{podSelector: {matchLabels: {app: loki}}}]
+      ports: [{protocol: TCP, port: 3100}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: grafana-forensic, namespace: log-pipeline}
+spec:
+  podSelector: {matchLabels: {app: grafana-forensic}}
+  policyTypes: [Egress]
+  egress:
+    - to: [{podSelector: {matchLabels: {app: loki-forensic}}}]
+      ports: [{protocol: TCP, port: 3100}]
+---
+# ---------------------------------------------------------------------------------------------
+# Apps + Fluent Bit sidecar
+# ---------------------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata: {name: processor, namespace: log-pipeline}
+spec:
+  selector: {app: log-apps}
+  ports: [{name: http-in, port: 9880, targetPort: 9880}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: log-apps, namespace: log-pipeline}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: log-apps}}
+  template:
+    metadata: {labels: {app: log-apps}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: app-hr
+          image: devdays-log-pipeline-student
+          imagePullPolicy: Never
+          env: [{name: APP_SERVICE, value: hr}, {name: LOG_INTERVAL_SECONDS, value: "2"}]
+          volumeMounts: [{name: hr-raw, mountPath: /raw}]
+          securityContext: &locked
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          resources: &small {requests: {cpu: 20m, memory: 32Mi}, limits: {cpu: 200m, memory: 128Mi}}
+        - name: app-billing
+          image: devdays-log-pipeline-student
+          imagePullPolicy: Never
+          env: [{name: APP_SERVICE, value: billing}, {name: LOG_INTERVAL_SECONDS, value: "2"}]
+          volumeMounts: [{name: billing-raw, mountPath: /raw}]
+          securityContext: *locked
+          resources: *small
+        - name: fluent-bit
+          image: fluent/fluent-bit:5.1.4
+          args: ["/fluent-bit/bin/fluent-bit", "-c", "/fluent-bit/etc/fluent-bit.conf"]
+          ports: [{containerPort: 9880}]
+          volumeMounts:
+            - {name: hr-raw, mountPath: /raw/hr, readOnly: true}
+            - {name: billing-raw, mountPath: /raw/billing, readOnly: true}
+            - {name: fluent-bit-config, mountPath: /fluent-bit/etc, readOnly: true}
+            - {name: fluent-bit-state, mountPath: /fluent-bit/state}
+          securityContext: *locked
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 500m, memory: 256Mi}}
+      volumes:
+        - {name: hr-raw, emptyDir: {}}
+        - {name: billing-raw, emptyDir: {}}
+        - {name: fluent-bit-config, configMap: {name: fluent-bit-config}}
+        - {name: fluent-bit-state, emptyDir: {}}   # holds raw records awaiting delivery: sensitive
+---
+# ---------------------------------------------------------------------------------------------
+# Presidio fallback
+# ---------------------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata: {name: log-presidio, namespace: log-pipeline}
+spec:
+  selector: {app: log-presidio}
+  ports: [{port: 8000, targetPort: 8000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: log-presidio, namespace: log-pipeline}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: log-presidio}}
+  template:
+    metadata: {labels: {app: log-presidio}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 10010, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: presidio
+          image: devdays-log-pipeline-presidio
+          imagePullPolicy: Never
+          env: [{name: SANITISED_FORWARD_URL, value: "http://processor:9880/sanitised.presidio"}]
+          ports: [{containerPort: 8000}]
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 15
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+          resources: {requests: {cpu: 100m, memory: 512Mi}, limits: {cpu: "1", memory: 1Gi}}
+      volumes: [{name: tmp, emptyDir: {}}]
+---
+# ---------------------------------------------------------------------------------------------
+# Loki stores
+# ---------------------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata: {name: loki, namespace: log-pipeline}
+spec:
+  selector: {app: loki}
+  ports: [{port: 3100, targetPort: 3100}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: loki, namespace: log-pipeline}
+spec:
+  serviceName: loki
+  replicas: 1
+  selector: {matchLabels: {app: loki}}
+  template:
+    metadata: {labels: {app: loki}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: loki
+          image: grafana/loki:3.7.8
+          args: ["-config.file=/etc/loki/loki.yaml"]
+          ports: [{containerPort: 3100}]
+          readinessProbe: {httpGet: {path: /ready, port: 3100}, initialDelaySeconds: 10}
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          volumeMounts:
+            - {name: config, mountPath: /etc/loki/loki.yaml, subPath: loki-standard.yaml}
+            - {name: data, mountPath: /loki}
+      volumes: [{name: config, configMap: {name: loki-config}}]
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 2Gi}}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: loki-forensic, namespace: log-pipeline}
+spec:
+  selector: {app: loki-forensic}
+  ports: [{port: 3100, targetPort: 3100}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: loki-forensic, namespace: log-pipeline}
+spec:
+  serviceName: loki-forensic
+  replicas: 1
+  selector: {matchLabels: {app: loki-forensic}}
+  template:
+    metadata: {labels: {app: loki-forensic, data-classification: sensitive}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: loki
+          image: grafana/loki:3.7.8
+          args: ["-config.file=/etc/loki/loki.yaml"]
+          ports: [{containerPort: 3100}]
+          readinessProbe: {httpGet: {path: /ready, port: 3100}, initialDelaySeconds: 10}
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          volumeMounts:
+            - {name: config, mountPath: /etc/loki/loki.yaml, subPath: loki-forensic.yaml}
+            - {name: data, mountPath: /loki}
+      volumes: [{name: config, configMap: {name: loki-config}}]
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 5Gi}}}
+---
+# ---------------------------------------------------------------------------------------------
+# Grafana instances (no Service exposure outside the cluster; use kubectl port-forward)
+# ---------------------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: grafana, namespace: log-pipeline}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: grafana}}
+  template:
+    metadata: {labels: {app: grafana}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: grafana
+          image: grafana/grafana:13.2.3
+          ports: [{containerPort: 3000}]
+          env: &grafana-env
+            - {name: GF_SECURITY_ADMIN_USER, value: admin}
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom: {secretKeyRef: {name: grafana-admin, key: GRAFANA_ADMIN_PASSWORD}}
+            - {name: GF_AUTH_ANONYMOUS_ENABLED, value: "false"}
+            - {name: GF_USERS_ALLOW_SIGN_UP, value: "false"}
+            - {name: GF_ANALYTICS_REPORTING_ENABLED, value: "false"}
+            - {name: GF_ANALYTICS_CHECK_FOR_UPDATES, value: "false"}
+            - {name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH, value: /etc/grafana/dashboards/logs.json}
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          volumeMounts:
+            - {name: provisioning, mountPath: /etc/grafana/provisioning/datasources/datasources.yaml, subPath: standard-datasources.yaml}
+            - {name: provisioning, mountPath: /etc/grafana/provisioning/dashboards/dashboards.yaml, subPath: dashboards.yaml}
+            - {name: provisioning, mountPath: /etc/grafana/dashboards/logs.json, subPath: standard-logs.json}
+      volumes: [{name: provisioning, configMap: {name: grafana-provisioning}}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: grafana-forensic, namespace: log-pipeline}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: grafana-forensic}}
+  template:
+    metadata: {labels: {app: grafana-forensic, data-classification: sensitive}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: grafana
+          image: grafana/grafana:13.2.3
+          ports: [{containerPort: 3000}]
+          env:
+            - {name: GF_SECURITY_ADMIN_USER, value: admin}
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom: {secretKeyRef: {name: grafana-admin, key: FORENSIC_GRAFANA_ADMIN_PASSWORD}}
+            - {name: GF_AUTH_ANONYMOUS_ENABLED, value: "false"}
+            - {name: GF_USERS_ALLOW_SIGN_UP, value: "false"}
+            - {name: GF_ANALYTICS_REPORTING_ENABLED, value: "false"}
+            - {name: GF_ANALYTICS_CHECK_FOR_UPDATES, value: "false"}
+            - {name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH, value: /etc/grafana/dashboards/logs.json}
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          volumeMounts:
+            - {name: provisioning, mountPath: /etc/grafana/provisioning/datasources/datasources.yaml, subPath: forensic-datasources.yaml}
+            - {name: provisioning, mountPath: /etc/grafana/provisioning/dashboards/dashboards.yaml, subPath: dashboards.yaml}
+            - {name: provisioning, mountPath: /etc/grafana/dashboards/logs.json, subPath: forensic-logs.json}
+      volumes: [{name: provisioning, configMap: {name: grafana-provisioning}}]

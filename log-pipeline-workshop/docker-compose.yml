@@ -15,6 +15,7 @@ services:
       LOG_INTERVAL_SECONDS: ${LOG_INTERVAL_SECONDS:-2}
     volumes:
       - hr_raw:/raw
+    network_mode: none
 
   app-billing:
     <<: *runtime
@@ -24,16 +25,163 @@ services:
       LOG_INTERVAL_SECONDS: ${LOG_INTERVAL_SECONDS:-2}
     volumes:
       - billing_raw:/raw
+    network_mode: none
 
+  # Exercise 2: Fluent Bit is the log processor. Known-format logs take the regex/Lua
+  # path and print here; everything else goes to log-presidio. No host ports.
   processor:
+    image: fluent/fluent-bit:5.1.4
+    profiles: ["pipeline"]
+    command: ["/fluent-bit/bin/fluent-bit", "-c", "/fluent-bit/etc/fluent-bit.conf"]
+    volumes:
+      - hr_raw:/raw/hr:ro
+      - billing_raw:/raw/billing:ro
+      - ./fluent-bit:/fluent-bit/etc:ro
+      # Holds tail offsets and raw records waiting for Presidio: treat as sensitive.
+      - fluentbit_state:/fluent-bit/state
+    networks:
+      - log_net
+      - forensic_net
+      - standard_net
+    depends_on:
+      log-presidio:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      loki-forensic:
+        condition: service_healthy
+
+  log-presidio:
+    image: devdays-log-pipeline-presidio
+    profiles: ["pipeline"]
+    build:
+      context: ./presidio
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp
+    environment:
+      # Fluent Bit's HTTP input tags records with the URL path, so this path is the tag.
+      SANITISED_FORWARD_URL: http://processor:9880/sanitised.presidio
+    networks:
+      - log_net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  # Exercise 3: standard store. Sanitised records only; 7-day retention.
+  loki:
+    image: grafana/loki:3.7.8
+    profiles: ["pipeline"]
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./loki/loki-standard.yaml:/etc/loki/loki.yaml:ro
+      - loki_standard_data:/loki
+    networks:
+      - standard_net
+    healthcheck:
+      test: ["CMD", "/usr/bin/loki", "-version"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Exercise 3: forensic store. Every raw log, unsanitised: SENSITIVE. 3-year retention.
+  # Reachable only from the processor and grafana-forensic (forensic_net).
+  loki-forensic:
+    image: grafana/loki:3.7.8
+    profiles: ["pipeline"]
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./loki/loki-forensic.yaml:/etc/loki/loki.yaml:ro
+      - loki_forensic_data:/loki
+    networks:
+      - forensic_net
+    healthcheck:
+      test: ["CMD", "/usr/bin/loki", "-version"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Standard Grafana: sanitised logs only. http://127.0.0.1:3000 (admin / GRAFANA_ADMIN_PASSWORD in .env)
+  grafana:
+    image: grafana/grafana:13.2.3
+    profiles: ["pipeline"]
+    environment: &grafana-env
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in log-pipeline-workshop/.env}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/logs.json
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./grafana/standard/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+      - ./grafana/dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro
+      - ./grafana/standard/logs.json:/etc/grafana/dashboards/logs.json:ro
+    networks:
+      - standard_net
+      - grafana_ui
+    depends_on:
+      loki:
+        condition: service_healthy
+
+  # Forensic Grafana: raw logs, separate instance and credentials.
+  # http://127.0.0.1:3001 (admin / FORENSIC_GRAFANA_ADMIN_PASSWORD in .env)
+  grafana-forensic:
+    image: grafana/grafana:13.2.3
+    profiles: ["pipeline"]
+    environment:
+      <<: *grafana-env
+      GF_SECURITY_ADMIN_PASSWORD: ${FORENSIC_GRAFANA_ADMIN_PASSWORD:?set FORENSIC_GRAFANA_ADMIN_PASSWORD in log-pipeline-workshop/.env}
+    ports:
+      - "127.0.0.1:3001:3000"
+    volumes:
+      - ./grafana/forensic/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+      - ./grafana/dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro
+      - ./grafana/forensic/logs.json:/etc/grafana/dashboards/logs.json:ro
+    networks:
+      - forensic_net
+      - grafana_forensic_ui
+    depends_on:
+      loki-forensic:
+        condition: service_healthy
+
+  # Exercise 1: the Python batch sanitiser, kept as a reference implementation.
+  batch-processor:
     <<: *runtime
     profiles: ["exercise"]
     command: ["python", "starter.py"]
+    network_mode: none
     volumes:
       - hr_raw:/raw/hr:ro
       - billing_raw:/raw/billing:ro
       - .:/app
 
+networks:
+  # Private: Fluent Bit <-> Presidio only, no internet.
+  log_net:
+    internal: true
+  # Private: Fluent Bit, forensic Loki and forensic Grafana only.
+  forensic_net:
+    internal: true
+  # Private: Fluent Bit, standard Loki and standard Grafana only.
+  standard_net:
+    internal: true
+  # Host access to each Grafana UI (published on 127.0.0.1 only).
+  grafana_ui: {}
+  grafana_forensic_ui: {}
+
 volumes:
   hr_raw:
   billing_raw:
+  fluentbit_state:
+  loki_standard_data:
+  loki_forensic_data:
