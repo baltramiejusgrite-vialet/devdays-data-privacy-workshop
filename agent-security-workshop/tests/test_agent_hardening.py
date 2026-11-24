@@ -238,8 +238,8 @@ def test_database_connection_works():
 
 
 def test_database_projects_readable():
-    code = (
-        "import json, os, urllib.request as u\n"
-        "print(len(json.load(u.urlopen(os.environ['GATEWAY_URL'] + '/projects', timeout=10))['items']))"
-    )
-    assert int(agent_python(code)) >= 2
+    from gateway_client import gateway_request
+
+    status, body = gateway_request("/projects")
+    assert status == 200
+    assert len(body["items"]) >= 2

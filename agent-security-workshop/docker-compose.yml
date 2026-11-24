@@ -93,6 +93,7 @@ services:
     volumes:
       - ./starter.py:/workspace/starter.py:ro
       - agent_credentials:/run/credentials/codex:ro
+      - agent_identity:/run/identity:ro
     depends_on:
       gateway:
         condition: service_healthy
@@ -114,6 +115,28 @@ services:
       - agent_credentials:/run/credentials/codex
     command: ["sh", "-c", "echo proxy-managed | codex login --with-api-key"]
 
+  # One-off: issues the agent's gateway token (step 7). Stores only its hash in the
+  # database and writes the token to the identity volume the agent mounts read-only.
+  #   docker compose --profile setup run --rm identity-issuer
+  identity-issuer:
+    <<: *hardened
+    image: devdays-agent-student
+    profiles: ["setup"]
+    user: "10001:10001"
+    networks:
+      - db_net
+    environment:
+      ADMIN_DATABASE_URL: postgresql://lab_admin:student-demo@db:5432/agent_lab
+      TOKEN_ACTOR: workshop-agent
+      TOKEN_COMPANY_ID: "1"
+    volumes:
+      - ./identity/issue_token.py:/app/issue_token.py:ro
+      - agent_identity:/run/identity
+    command: ["python", "/app/issue_token.py"]
+    depends_on:
+      db:
+        condition: service_healthy
+
 networks:
   agent_net:
     internal: true
@@ -124,3 +147,4 @@ networks:
 volumes:
   student_agent_data:
   agent_credentials:
+  agent_identity:

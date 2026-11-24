@@ -8,7 +8,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 10001 agent \
     && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/agent --shell /usr/sbin/nologin agent \
-    && install -d -o 10001 -g 10001 -m 0700 /run/credentials/codex
+    && install -d -o 10001 -g 10001 -m 0700 /run/credentials/codex \
+    && install -d -o 10001 -g 10001 -m 0700 /run/identity
 ENV HOME=/home/agent
 WORKDIR /workspace
 COPY starter.py ./

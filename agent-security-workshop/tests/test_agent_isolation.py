@@ -15,6 +15,7 @@ LAB_DIR = Path(__file__).resolve().parent.parent
 ALLOWED_MOUNTS = {
     "/workspace/starter.py": False,
     "/run/credentials/codex": False,
+    "/run/identity": False,
 }
 HOST_PROJECT_FILES = [
     "/workspace/docker-compose.yml",
@@ -167,8 +168,8 @@ def test_existing_restrictions_preserved(container):
 
 
 def test_database_still_reachable():
-    code = (
-        "import json, os, urllib.request as u\n"
-        "print(len(json.load(u.urlopen(os.environ['GATEWAY_URL'] + '/projects', timeout=10))['items']))"
-    )
-    assert int(agent_python(code)) >= 2
+    from gateway_client import gateway_request
+
+    status, body = gateway_request("/projects")
+    assert status == 200
+    assert len(body["items"]) >= 2

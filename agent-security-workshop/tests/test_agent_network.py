@@ -98,20 +98,19 @@ def test_agent_reaches_model_proxy():
 
 
 def test_gateway_lists_projects():
-    code = "import json, os, urllib.request as u; print(json.load(u.urlopen(os.environ['GATEWAY_URL'] + '/projects', timeout=10))['items'])"
-    assert exec_python("agent", code) == "[{'project_id': 1, 'title': 'Conference schedule'}, {'project_id': 2, 'title': 'Workshop materials'}]"
+    from gateway_client import gateway_request
+
+    assert gateway_request("/projects") == (200, {"items": [
+        {"project_id": 1, "title": "Conference schedule"},
+        {"project_id": 2, "title": "Workshop materials"},
+    ]})
 
 
 def test_gateway_rejects_writes():
-    code = (
-        "import os, urllib.request as u, urllib.error as e\n"
-        "try:\n"
-        "    u.urlopen(u.Request(os.environ['GATEWAY_URL'] + '/projects', data=b'{}', method='POST'), timeout=10)\n"
-        "    print('accepted')\n"
-        "except e.HTTPError as err:\n"
-        "    print(err.code)"
-    )
-    assert exec_python("agent", code) == "405"
+    from gateway_client import gateway_request
+
+    status, _ = gateway_request("/projects", method="POST")
+    assert status == 405
 
 
 def test_gateway_config_mounted_read_only(containers):
