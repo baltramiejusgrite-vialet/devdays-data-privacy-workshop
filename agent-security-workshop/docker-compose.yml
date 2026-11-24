@@ -28,15 +28,39 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+      - /home/agent:uid=10001,gid=10001,mode=0700
     environment:
       DATABASE_URL: postgresql://lab_admin:student-demo@db:5432/agent_lab
       # Passed through from the host environment; the value is never written here.
       OPENAI_API_KEY:
     volumes:
       - .:/workspace
+      - agent_credentials:/run/credentials/codex:ro
     depends_on:
       db:
         condition: service_healthy
 
+  # One-off: stores the Codex API key login in the credential volume.
+  #   docker compose --profile setup run --rm codex-login
+  codex-login:
+    image: devdays-agent-student
+    profiles: ["setup"]
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    environment:
+      CODEX_HOME: /run/credentials/codex
+      OPENAI_API_KEY:
+    volumes:
+      - agent_credentials:/run/credentials/codex
+    command: ["sh", "-c", "printenv OPENAI_API_KEY | codex login --with-api-key"]
+
 volumes:
   student_agent_data:
+  agent_credentials:

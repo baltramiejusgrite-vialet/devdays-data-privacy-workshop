@@ -13,6 +13,7 @@ LAB_DIR = Path(__file__).resolve().parent.parent
 AGENT_UID = "10001"
 AGENT_GID = "10001"
 ZERO_CAPS = "0000000000000000"
+CREDENTIAL_DIR = "/run/credentials/codex"
 
 
 def run(*args, check=True):
@@ -139,6 +140,75 @@ def test_can_create_read_delete_workspace_file():
 def test_home_directory_is_writable():
     code = "import os, pathlib; p = pathlib.Path(os.environ['HOME'], '.write-test'); p.write_text('x'); p.unlink(); print('ok')"
     assert agent_python(code) == "ok"
+
+
+# Requirement 7: read-only root filesystem
+
+
+def test_read_only_root_configured(container):
+    assert container["HostConfig"]["ReadonlyRootfs"] is True
+
+
+@pytest.mark.parametrize("path", ["/", "/usr/local/bin", "/etc", "/run"])
+def test_root_filesystem_rejects_writes(path):
+    result = agent_exec("sh", "-c", f"touch {path}/.ro-test", check=False)
+    assert result.returncode != 0
+    assert "Read-only file system" in result.stderr
+
+
+def test_root_mount_is_read_only():
+    mount_options = agent_exec("sh", "-c", "awk '$2 == \"/\" {print $4}' /proc/mounts").stdout
+    assert mount_options.split(",")[0] == "ro"
+
+
+# Requirement 8: /tmp and /home/agent writable through temporary mounts
+
+
+@pytest.mark.parametrize("path", ["/tmp", "/home/agent"])
+def test_path_is_tmpfs_mount(container, path):
+    assert path in container["HostConfig"]["Tmpfs"]
+    fs_type = agent_exec("sh", "-c", f"awk '$2 == \"{path}\" {{print $3}}' /proc/mounts").stdout.strip()
+    assert fs_type == "tmpfs"
+
+
+@pytest.mark.parametrize("path", ["/tmp", "/home/agent"])
+def test_temporary_mount_is_writable(path):
+    code = f"import pathlib; p = pathlib.Path('{path}/.tmpfs-test'); p.write_text('x'); p.unlink(); print('ok')"
+    assert agent_python(code) == "ok"
+
+
+def test_home_owned_by_agent():
+    assert agent_exec("stat", "-c", "%u:%g", "/home/agent").stdout.strip() == f"{AGENT_UID}:{AGENT_GID}"
+
+
+# Requirement 9: credential volume mounted read-only
+
+
+def test_credential_volume_mounted_read_only(container):
+    mounts = [m for m in container["Mounts"] if m["Destination"] == CREDENTIAL_DIR]
+    assert len(mounts) == 1
+    assert mounts[0]["Type"] == "volume"
+    assert mounts[0]["RW"] is False
+
+
+def test_credentials_are_readable():
+    assert agent_exec("test", "-r", f"{CREDENTIAL_DIR}/auth.json", check=False).returncode == 0
+
+
+def test_credentials_cannot_be_changed():
+    result = agent_exec("sh", "-c", f"touch {CREDENTIAL_DIR}/auth.json {CREDENTIAL_DIR}/.new", check=False)
+    assert result.returncode != 0
+    assert "Read-only file system" in result.stderr
+
+
+def test_codex_sees_its_login():
+    agent_python(
+        "import sys; sys.argv = ['x']; import importlib.util as u; "
+        "s = u.spec_from_file_location('starter', '/workspace/starter.py'); m = u.module_from_spec(s); "
+        "s.loader.exec_module(m); m.link_credentials()"
+    )
+    status = agent_exec("codex", "login", "status")
+    assert "API key configured" in status.stdout + status.stderr
 
 
 # Requirement 6: preserve database access
