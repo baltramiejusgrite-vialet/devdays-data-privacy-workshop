@@ -19,13 +19,22 @@ def test_row_security_is_enabled(readonly_conn):
     assert enabled is True
 
 
-def test_no_company_set_shows_no_rows(readonly_conn):
-    assert visible_ids(readonly_conn) == []
+def test_direct_access_without_company_is_permission_error(readonly_conn):
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        readonly_conn.execute("SELECT * FROM private_db.company").fetchall()
 
 
-def test_empty_company_shows_no_rows(readonly_conn):
+def test_query_with_company_variable_returns_one_result(readonly_conn):
+    set_company(readonly_conn, "42")
+    rows = readonly_conn.execute("SELECT company_id, company_name FROM private_db.company").fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == 42
+
+
+def test_empty_company_is_permission_error(readonly_conn):
     set_company(readonly_conn, "")
-    assert visible_ids(readonly_conn) == []
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        visible_ids(readonly_conn)
 
 
 @pytest.mark.parametrize("company_id", [1, 600, 1200])
